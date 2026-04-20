@@ -21,6 +21,7 @@ The outlier detection service uses pre-computed segment statistics (lookup table
 - **`configs/`**: Configuration files
   - `constants.py`: Core constants (property types, multipliers, thresholds)
   - `feedback_config.py`: CX feedback loop configuration
+  - `dataset_config.py`: Dataset configuration for endpoint testing using redshift online listings
 
 ### Deployment
 - **`Dockerfile`**: Docker container definition for SageMaker BYOC (Bring Your Own Container)
