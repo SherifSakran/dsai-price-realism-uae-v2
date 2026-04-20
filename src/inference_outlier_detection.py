@@ -10,6 +10,8 @@ import numpy as np
 import sys
 from pathlib import Path
 from typing import Optional
+import time
+from datetime import datetime
 
 sys.path.append(str(Path(__file__).parent.parent))
 from configs.dataset_config import (
@@ -326,7 +328,10 @@ def run_inference(df: pd.DataFrame,
     
     # Assign segments from lookup table
     print("Assigning segments from lookup table...")
+    assign_start_time = time.time()
     df = assign_segments_from_lookup(df, lookup_table)
+    assign_time = time.time() - assign_start_time
+    print(f"Segment assignment completed in {assign_time:.2f} seconds ({assign_time/60:.2f} minutes)")
     
     # Summary of segment assignment
     assigned = (~df['unseen']).sum()
@@ -342,7 +347,10 @@ def run_inference(df: pd.DataFrame,
 
     # Compute bounds and flags
     print("\nComputing bounds and outlier flags...")
+    compute_start_time = time.time()
     df = compute_bounds_and_flags(df)
+    compute_time = time.time() - compute_start_time
+    print(f"Outlier detection completed in {compute_time:.2f} seconds ({compute_time/60:.2f} minutes)")
     
     # Summary statistics (only for attributes that were computed)
     if assigned > 0:
@@ -471,8 +479,30 @@ def main():
     """
     Main function for inference.
     """
+    # Setup logging
+    log_file = f"../logs/inference_outlier_detection_{version[:-3]}.txt"
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Redirect stdout to both console and file
+    class Logger:
+        def __init__(self, filename):
+            self.terminal = sys.stdout
+            self.log = open(filename, 'w')
+        
+        def write(self, message):
+            self.terminal.write(message)
+            self.log.write(message)
+        
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+    
+    sys.stdout = Logger(log_file)
+    
+    script_start_time = time.time()
     print("=" * 80)
     print("Outlier Detection Inference")
+    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     
     # Load lookup table
@@ -508,7 +538,7 @@ def main():
     # print(f"After filtering (price > 0 and sqft > 0): {len(df):,} listings")
 
     # Filter for online and recent listings (both categories)
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     
     n_days_ago = 30
     thirty_days_ago = datetime.now() - timedelta(days=n_days_ago)
@@ -575,6 +605,8 @@ def main():
     csv_cols = [col for col in csv_cols if col in outliers.columns]
     outliers[csv_cols].to_csv(csv_path, index=False)
     
+    script_time = time.time() - script_start_time
+    
     print("\n" + "=" * 80)
     print("Inference complete!")
     print(f"  Processed listings: {len(df_flagged):,}")
@@ -583,6 +615,8 @@ def main():
         rest_outliers = df_flagged[df_flagged['housing_type_name'].isin(REST_OF_HOUSING_TYPES) & df_flagged['is_any_outlier']]
         print(f"  Top Residential outliers: {len(top_res_outliers):,}")
         print(f"  Rest of Housing outliers: {len(rest_outliers):,}")
+    print(f"\nTotal execution time: {script_time:.2f} seconds ({script_time/60:.2f} minutes)")
+    print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     
     # Display sample outliers
@@ -594,6 +628,10 @@ def main():
         ]
         display_cols = [col for col in display_cols if col in outliers.columns]
         print(outliers[display_cols].head(10).to_string(index=False))
+    
+    # Close log file
+    sys.stdout.log.close()
+    sys.stdout = sys.stdout.terminal
 
 
 if __name__ == "__main__":

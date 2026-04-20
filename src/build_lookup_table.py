@@ -9,6 +9,8 @@ import pandas as pd
 import numpy as np
 import sys
 from pathlib import Path
+import time
+from datetime import datetime
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -59,7 +61,10 @@ def build_lookup_table(df: pd.DataFrame,
     
     # Assign segments with relaxation
     print("Assigning segments with relaxation...")
+    start_time = time.time()
     df = assign_segments_with_relaxation(df, min_segment_sizes)
+    assign_time = time.time() - start_time
+    print(f"Segment assignment completed in {assign_time:.2f} seconds ({assign_time/60:.2f} minutes)")
     
     # Filter to only listings with valid segments
     df_with_segments = df[df['segment_key'].notna()].copy()
@@ -69,6 +74,7 @@ def build_lookup_table(df: pd.DataFrame,
     
     # Calculate statistics per segment
     print("\nCalculating segment statistics...")
+    stats_start_time = time.time()
     
     # For without_bedrooms segments, we need to compute stats using ALL listings
     # that match the location/housing/offering/price, not just those assigned to it
@@ -138,8 +144,10 @@ def build_lookup_table(df: pd.DataFrame,
         lookup_rows.append(row)
     
     lookup = pd.DataFrame(lookup_rows)
+    stats_time = time.time() - stats_start_time
     
     print(f"\nLookup table created with {len(lookup):,} segments")
+    print(f"Statistics computation completed in {stats_time:.2f} seconds ({stats_time/60:.2f} minutes)")
     
     # Display summary
     print("\nSegment size distribution:")
@@ -156,8 +164,30 @@ def main():
     """
     Main function to build and save lookup table.
     """
+    # Setup logging
+    log_file = f"../logs/build_lookup_table_{version[:-3]}.txt"
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Redirect stdout to both console and file
+    class Logger:
+        def __init__(self, filename):
+            self.terminal = sys.stdout
+            self.log = open(filename, 'w')
+        
+        def write(self, message):
+            self.terminal.write(message)
+            self.log.write(message)
+        
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+    
+    sys.stdout = Logger(log_file)
+    
+    script_start_time = time.time()
     print("="*80)
     print("Building Lookup Table for All Housing Types")
+    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*80)
     
     # Load data
@@ -181,7 +211,7 @@ def main():
     print(f"After filtering (price > 0 and sqft > 0): {len(df):,} listings")
     
     # Filter for online and recent listings
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     
     n_days_ago = 30
     thirty_days_ago = datetime.now() - timedelta(days=n_days_ago)
@@ -264,16 +294,24 @@ def main():
     print(f"Saving lookup table (CSV) to: {csv_path}")
     lookup_table.to_csv(csv_path, index=False)
     
+    script_time = time.time() - script_start_time
+    
     print("\n" + "="*80)
     print("Lookup table creation complete!")
     print(f"  Top Residential segments: {len(lookup_table_residential):,}")
     print(f"  Rest of Housing segments: {len(lookup_table_rest):,}")
     print(f"  Total segments: {len(lookup_table):,}")
+    print(f"\nTotal execution time: {script_time:.2f} seconds ({script_time/60:.2f} minutes)")
+    print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*80)
     
     # Display sample
     print("\nSample lookup table entries:")
     print(lookup_table.head(10).to_string())
+    
+    # Close log file
+    sys.stdout.log.close()
+    sys.stdout = sys.stdout.terminal
 
 
 if __name__ == "__main__":
