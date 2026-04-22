@@ -14,7 +14,7 @@ from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 
-from deployment.src.schemas import PredictionRequest, PredictionResponse
+from deployment.src.schemas import PredictionRequest, PredictionResponse, FeedbackSubmissionRequest
 from deployment.src.model_loader import load_model
 from deployment.src.inference import process_single_request
 from deployment.src import feedback_loop
@@ -67,6 +67,36 @@ async def invocations(request: Request):
             data = json.loads(body)
         else:
             raise HTTPException(status_code=415, detail="Unsupported Media Type. Use application/json")
+
+        if isinstance(data, dict) and data.get('action') == 'submit_feedback':
+            print("[ACTION] Submit feedback requested via /invocations", file=sys.stderr)
+            try:
+                validated_request = FeedbackSubmissionRequest(**data)
+                result = feedback_loop.submit_feedback(validated_request.dict())
+                return result
+            except ValueError as ve:
+                return JSONResponse(
+                    content={'error': f'Validation error: {str(ve)}'},
+                    status_code=400
+                )
+            except Exception as e:
+                print(f"[FEEDBACK] Submit feedback error: {traceback.format_exc()}", file=sys.stderr)
+                return JSONResponse(
+                    content={'error': f'Failed to submit feedback: {str(e)}'},
+                    status_code=500
+                )
+
+        if isinstance(data, dict) and data.get('action') == 'check_feedback_status':
+            print("[ACTION] Check feedback status requested via /invocations", file=sys.stderr)
+            return {
+                "action": "check_feedback_status",
+                "status": "success",
+                "feedback_listings": len(feedback_loop.feedback_lookup['by_listing_id']),
+                "feedback_segments": len(feedback_loop.feedback_lookup['by_segment_key']),
+                "last_update_ts": feedback_loop.feedback_last_update_ts.isoformat() if feedback_loop.feedback_last_update_ts else None,
+                "is_updating": feedback_loop._feedback_updating,
+                "timestamp": datetime.now().isoformat()
+            }
 
         if isinstance(data, dict) and data.get('action') == 'force_refresh_feedback':
             print("[ACTION] Force refresh feedback requested via /invocations", file=sys.stderr)

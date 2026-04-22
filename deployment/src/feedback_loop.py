@@ -164,3 +164,102 @@ def build_feedback_response(
         "upper_bound": upper_bound,
         "segment_abs_pct_error": None,
     }
+
+
+def submit_feedback(feedback_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Submit feedback by appending to S3 parquet file and updating in-memory lookup.
+    
+    Follows the same structure as export_disputed_listings.py:
+    All columns are object (str) dtype except price and property_sqft which are float64.
+    """
+    global feedback_lookup, feedback_last_update_ts
+    
+    try:
+        s3 = boto3.client('s3')
+        
+        # Load existing feedback data from S3
+        try:
+            print(f"[FEEDBACK] Loading existing feedback from s3://{CX_FEEDBACK_S3_BUCKET}/{CX_FEEDBACK_S3_KEY}", file=sys.stderr)
+            resp = s3.get_object(Bucket=CX_FEEDBACK_S3_BUCKET, Key=CX_FEEDBACK_S3_KEY)
+            existing_df = pd.read_parquet(BytesIO(resp['Body'].read()))
+            print(f"[FEEDBACK] Loaded {len(existing_df):,} existing disputed listings", file=sys.stderr)
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            if error_code in ('NoSuchKey', 'NoSuchBucket', '404'):
+                print("[FEEDBACK] No existing feedback file found, creating new one", file=sys.stderr)
+                existing_df = pd.DataFrame()
+            else:
+                raise
+        
+        # Map input fields to match export_disputed_listings.py output format
+        property_type = normalize_property_type(str(feedback_data['property_type']))
+        category = str(feedback_data['category']).lower()
+        price_type = str(feedback_data['price_type']).lower()
+        offering_type_name = get_offering_type_name(category, price_type)
+        property_price_type_name = PRICE_TYPE_TO_NAME.get(price_type, price_type.title())
+        
+        # Build row matching the exact schema from export_disputed_listings.py
+        new_row = pd.DataFrame([{
+            'property_listing_id': str(feedback_data.get('property_listing_id', '')),
+            'location_id': str(feedback_data['location_id']),
+            'housing_type_name': str(property_type),
+            'offering_type_name': str(offering_type_name),
+            'property_price_type_name': str(property_price_type_name),
+            'bedrooms': str(feedback_data.get('bedrooms', '')),
+            'price': float(feedback_data['valid_price']),
+            'property_sqft': float(feedback_data['valid_property_sqft']),
+        }])
+        
+        # Ensure existing df columns match the same types before concat
+        if not existing_df.empty:
+            for col in existing_df.columns:
+                if col not in ('price', 'property_sqft'):
+                    existing_df[col] = existing_df[col].astype(str)
+        
+        updated_df = pd.concat([existing_df, new_row], ignore_index=True)
+        
+        # Remove duplicates based on property_listing_id
+        listing_id = str(feedback_data.get('property_listing_id', ''))
+        if listing_id:
+            updated_df = updated_df.drop_duplicates(subset=['property_listing_id'], keep='last')
+        
+        print(f"[FEEDBACK] Updated dataframe: {len(updated_df):,} listings", file=sys.stderr)
+        
+        # Write back to S3
+        buffer = BytesIO()
+        updated_df.to_parquet(buffer, index=False)
+        buffer.seek(0)
+        
+        s3.put_object(
+            Bucket=CX_FEEDBACK_S3_BUCKET,
+            Key=CX_FEEDBACK_S3_KEY,
+            Body=buffer.getvalue()
+        )
+        print(f"[FEEDBACK] Successfully wrote updated feedback to S3", file=sys.stderr)
+        
+        # Rebuild in-memory lookup
+        new_lookup = build_feedback_lookup_table(updated_df)
+        
+        with _feedback_lock:
+            feedback_lookup = new_lookup
+            feedback_last_update_ts = datetime.now()
+        
+        print(f"[FEEDBACK] Updated in-memory lookup: {len(new_lookup['by_listing_id'])} listings, "
+              f"{len(new_lookup['by_segment_key'])} segments", file=sys.stderr)
+        
+        return {
+            "action": "submit_feedback",
+            "status": "success",
+            "message": "Feedback submitted successfully",
+            "property_listing_id": listing_id,
+            "feedback_listings": len(feedback_lookup['by_listing_id']),
+            "feedback_segments": len(feedback_lookup['by_segment_key']),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"[FEEDBACK] Failed to submit feedback: {e}", file=sys.stderr)
+        import traceback
+        print(traceback.format_exc(), file=sys.stderr)
+        raise Exception(f"Failed to submit feedback: {str(e)}")
