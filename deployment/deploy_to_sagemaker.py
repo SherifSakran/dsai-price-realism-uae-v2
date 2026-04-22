@@ -2,16 +2,18 @@
 """
 Deploy the outlier detection model to SageMaker.
 
-This script creates a SageMaker model and endpoint for outlier detection.
+This script creates or updates a SageMaker model and endpoint for outlier detection.
 Reads configuration from .env file in the same directory.
 
 IMPORTANT: If the endpoint has auto-scaling enabled, you must first run
 deregister_autoscaling.py with dsa-production credentials before running
-this script with TEAM credentials.
+this script with TEAM credentials. After deployment, re-register autoscaling
+by running register_autoscaling.py with dsa-production credentials.
 
-Two-step deployment process:
+Zero-downtime deployment process:
 1. Run deregister_autoscaling.py (with dsa-production credentials)
-2. Run deploy_to_sagemaker.py (with TEAM credentials)
+2. Run deploy_to_sagemaker.py (with TEAM credentials) — uses update_endpoint for zero downtime
+3. Run register_autoscaling.py (with dsa-production credentials)
 """
 
 import boto3
@@ -104,62 +106,72 @@ def create_endpoint_config(
         return False
 
 
-def delete_endpoint_if_exists(
+def endpoint_exists(
     endpoint_name: str,
     region: str = 'ap-southeast-1'
 ):
     """
-    Delete a SageMaker endpoint if it exists.
+    Check if a SageMaker endpoint exists and return its status.
     
     Args:
-        endpoint_name: Name of the endpoint to delete
+        endpoint_name: Name of the endpoint
         region: AWS region
+        
+    Returns:
+        str or None: Endpoint status if it exists, None otherwise
     """
     sagemaker = boto3.client('sagemaker', region_name=region)
     
     try:
-        # Check if endpoint exists and get its status
         response = sagemaker.describe_endpoint(EndpointName=endpoint_name)
-        endpoint_status = response['EndpointStatus']
-        print(f"Endpoint {endpoint_name} exists with status: {endpoint_status}. Deleting...")
-        
-        # Delete the endpoint
-        sagemaker.delete_endpoint(EndpointName=endpoint_name)
-        print(f"Endpoint {endpoint_name} deletion initiated.")
-        
-        # Only wait for deletion if endpoint was not in a Failed state
-        # Failed endpoints may not transition properly through the waiter
-        if endpoint_status != 'Failed':
-            print("Waiting for endpoint deletion to complete...")
-            waiter = sagemaker.get_waiter('endpoint_deleted')
-            waiter.wait(EndpointName=endpoint_name)
-            print("Endpoint deletion complete.")
-        else:
-            # For failed endpoints, just poll until it's gone
-            print("Endpoint was in Failed state. Polling for deletion...")
-            import time
-            max_attempts = 60
-            for attempt in range(max_attempts):
-                try:
-                    sagemaker.describe_endpoint(EndpointName=endpoint_name)
-                    time.sleep(5)
-                except sagemaker.exceptions.ClientError as e:
-                    if 'Could not find endpoint' in str(e) or 'ValidationException' in str(e):
-                        print("Endpoint deletion complete.")
-                        break
-                    raise
-            else:
-                print("Warning: Endpoint deletion timed out, but proceeding anyway.")
-        
+        return response['EndpointStatus']
     except sagemaker.exceptions.ClientError as e:
         if e.response['Error']['Code'] == 'ValidationException':
-            print(f"Endpoint {endpoint_name} does not exist. Proceeding with creation.")
-        else:
-            print(f"Error checking/deleting endpoint: {str(e)}")
-            raise
-    except Exception as e:
-        print(f"Error deleting endpoint: {str(e)}")
+            return None
         raise
+
+
+def update_endpoint(
+    endpoint_name: str,
+    config_name: str,
+    region: str = 'ap-southeast-1',
+    wait: bool = True
+):
+    """
+    Update an existing SageMaker endpoint with a new configuration.
+    This performs a zero-downtime rolling (blue/green) update.
+    
+    Args:
+        endpoint_name: Name of the endpoint to update
+        config_name: Name of the new endpoint configuration
+        region: AWS region
+        wait: Whether to wait for the update to complete
+    """
+    sagemaker = boto3.client('sagemaker', region_name=region)
+    
+    print(f"Updating endpoint: {endpoint_name} with config: {config_name}")
+    print("This performs a zero-downtime rolling update (blue/green deployment).")
+    
+    try:
+        sagemaker.update_endpoint(
+            EndpointName=endpoint_name,
+            EndpointConfigName=config_name
+        )
+        print(f"Endpoint update initiated.")
+        
+        if wait:
+            print("Waiting for endpoint update to complete (this may take several minutes)...")
+            waiter = sagemaker.get_waiter('endpoint_in_service')
+            waiter.wait(
+                EndpointName=endpoint_name,
+                WaiterConfig={'Delay': 30, 'MaxAttempts': 60}
+            )
+            print(f"Endpoint {endpoint_name} update complete and in service!")
+        
+        return True
+    except Exception as e:
+        print(f"Error updating endpoint: {str(e)}")
+        return False
 
 
 def create_endpoint(
@@ -299,27 +311,35 @@ def main():
     
     print()
     
-    # Step 3: Delete existing endpoint if it exists
-    try:
-        delete_endpoint_if_exists(
-            endpoint_name=config['endpoint_name'],
-            region=config['region']
-        )
-    except Exception as e:
-        print(f"Failed to delete existing endpoint: {str(e)}")
-        return 1
-    
-    print()
-    
-    # Step 4: Create endpoint
-    if not create_endpoint(
+    # Step 3: Update or create endpoint
+    status = endpoint_exists(
         endpoint_name=config['endpoint_name'],
-        config_name=config_name,
-        region=config['region'],
-        wait=True
-    ):
-        print("Failed to create endpoint. Exiting.")
-        return 1
+        region=config['region']
+    )
+    
+    if status is not None:
+        print(f"Endpoint {config['endpoint_name']} exists with status: {status}")
+        print("Performing zero-downtime update...")
+        print()
+        if not update_endpoint(
+            endpoint_name=config['endpoint_name'],
+            config_name=config_name,
+            region=config['region'],
+            wait=True
+        ):
+            print("Failed to update endpoint. Exiting.")
+            return 1
+    else:
+        print(f"Endpoint {config['endpoint_name']} does not exist. Creating new endpoint...")
+        print()
+        if not create_endpoint(
+            endpoint_name=config['endpoint_name'],
+            config_name=config_name,
+            region=config['region'],
+            wait=True
+        ):
+            print("Failed to create endpoint. Exiting.")
+            return 1
     
     print()
     print("=" * 80)
@@ -327,6 +347,9 @@ def main():
     print("=" * 80)
     print(f"Endpoint Name: {config['endpoint_name']}")
     print(f"Region: {config['region']}")
+    print()
+    print("Next step: Re-register auto-scaling with dsa-production credentials:")
+    print(f"  python register_autoscaling.py")
     print()
     print("You can now invoke the endpoint using:")
     print(f"  aws sagemaker-runtime invoke-endpoint \\")
