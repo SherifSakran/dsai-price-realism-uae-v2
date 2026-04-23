@@ -90,10 +90,10 @@ def process_single_request(data: Dict[str, Any], lookup_dict: Dict, artifacts: D
             multiplier
         )
         print(f"[DEBUG] SQFT check: value={row['property_sqft']}, median={segment_info['property_sqft_median']}, "
-              f"multiplier={multiplier}, is_outlier={sqft_outlier_result['is_outlier']}, "
+              f"multiplier={multiplier}, lower={1.0/multiplier*segment_info['property_sqft_median']:.2f}, "
+              f"upper={multiplier*segment_info['property_sqft_median']:.2f}, "
+              f"is_outlier={sqft_outlier_result['is_outlier']}, "
               f"type={sqft_outlier_result['outlier_type']}", file=sys.stderr)
-        print(f"[INFO] SQFT bounds: lb={1.0/multiplier*segment_info['property_sqft_median']}, "
-              f"ub={multiplier*segment_info['property_sqft_median']}")
 
     price_to_sqft_outlier_result = {'is_outlier': False, 'outlier_type': 'not_outlier', 'deviation_ratio': None}
     if row['price_to_sqft'] is not None and segment_info['price_to_sqft_median'] is not None:
@@ -103,7 +103,9 @@ def process_single_request(data: Dict[str, Any], lookup_dict: Dict, artifacts: D
             multiplier
         )
         print(f"[DEBUG] PTS check: value={row['price_to_sqft']}, median={segment_info['price_to_sqft_median']}, "
-              f"multiplier={multiplier}, is_outlier={price_to_sqft_outlier_result['is_outlier']}, "
+              f"multiplier={multiplier}, lower={1.0/multiplier*segment_info['price_to_sqft_median']:.2f}, "
+              f"upper={multiplier*segment_info['price_to_sqft_median']:.2f}, "
+              f"is_outlier={price_to_sqft_outlier_result['is_outlier']}, "
               f"type={price_to_sqft_outlier_result['outlier_type']}", file=sys.stderr)
 
     price_outlier_result = {'is_outlier': False, 'outlier_type': 'not_outlier', 'deviation_ratio': None}
@@ -114,7 +116,9 @@ def process_single_request(data: Dict[str, Any], lookup_dict: Dict, artifacts: D
             multiplier
         )
         print(f"[DEBUG] PRICE check: value={row['price']}, median={segment_info['price_median']}, "
-              f"multiplier={multiplier}, is_outlier={price_outlier_result['is_outlier']}, "
+              f"multiplier={multiplier}, lower={1.0/multiplier*segment_info['price_median']:.2f}, "
+              f"upper={multiplier*segment_info['price_median']:.2f}, "
+              f"is_outlier={price_outlier_result['is_outlier']}, "
               f"type={price_outlier_result['outlier_type']}", file=sys.stderr)
 
     valid_size = not (sqft_outlier_result['is_outlier'] and price_to_sqft_outlier_result['is_outlier'])
