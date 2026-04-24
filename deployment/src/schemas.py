@@ -126,3 +126,64 @@ class PredictionResponse(BaseModel):
     lower_bound: Union[float, None]
     upper_bound: Union[float, None]
     segment_abs_pct_error: Union[float, None]
+
+
+class FeedbackSubmissionRequest(BaseModel):
+    action: str = Field(default="submit_feedback")
+    property_type: PropertyTypeEnum
+    location_id: str
+    price_type: PriceTypeEnum
+    category: CategoryEnum
+    valid_property_sqft: float
+    bedrooms: Union[str, None] = None
+    bathrooms: Union[str, None] = None
+    floor_number: Union[str, None] = None
+    completion_status: Union[CompletionStatusEnum, None] = None
+    furnishing_type: Union[FurnishingTypeEnum, None] = None
+    property_parking: str = ""
+    valid_price: float
+    property_listing_id: Union[str, None] = None
+
+    @validator('property_type', pre=True)
+    def normalize_property_type_input(cls, v):
+        if isinstance(v, str):
+            for enum_val in PropertyTypeEnum:
+                if v.lower() == enum_val.value.lower():
+                    return enum_val.value
+        return v
+
+    @validator('price_type', pre=True)
+    def normalize_price_type_input(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @validator('category', pre=True)
+    def normalize_category_input(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @validator('completion_status', pre=True)
+    def normalize_completion_status_input(cls, v):
+        if v is not None and isinstance(v, str):
+            return v.lower()
+        return v
+
+    @validator('furnishing_type', pre=True)
+    def normalize_furnishing_type_input(cls, v):
+        if v is not None and isinstance(v, str):
+            return v.lower()
+        return v
+
+    @validator('valid_property_sqft')
+    def validate_sqft(cls, v):
+        if v <= 0:
+            raise ValueError('valid_property_sqft must be greater than 0')
+        return v
+
+    @validator('valid_price')
+    def validate_price(cls, v):
+        if v <= 0:
+            raise ValueError('valid_price must be greater than 0')
+        return v
