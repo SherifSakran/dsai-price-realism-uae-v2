@@ -40,7 +40,8 @@ echo "ECR Image URI: ${ECR_IMAGE}"
 # Build Docker image (from project root)
 cd "${SCRIPT_DIR}/.."
 # Build for linux/amd64 (SageMaker requirement)
-docker buildx build --platform linux/amd64 --provenance=false --output type=docker -t ${IMAGE_NAME}:latest -f deployment/Dockerfile .
+# Using plain 'docker build' instead of 'buildx' to ensure Docker V2 manifest format
+docker build --provenance=false --platform linux/amd64 -t ${IMAGE_NAME}:latest -f deployment/Dockerfile .
 
 # Tag image for ECR
 docker tag ${IMAGE_NAME}:latest ${ECR_IMAGE}
