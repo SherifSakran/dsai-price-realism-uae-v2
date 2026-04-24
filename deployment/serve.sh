@@ -8,4 +8,4 @@ cd /opt/program
 exec python -m uvicorn serve:app \
     --host 0.0.0.0 \
     --port 8080 \
-    --workers 4
+    --workers 1
