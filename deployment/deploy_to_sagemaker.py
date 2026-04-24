@@ -19,6 +19,7 @@ Zero-downtime deployment process:
 import boto3
 import os
 import sys
+import argparse
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -27,9 +28,11 @@ from dotenv import load_dotenv
 def create_model(
     model_name: str,
     image_uri: str,
-    model_data_url: str,
     role_arn: str,
-    region: str = 'ap-southeast-1'
+    region: str = 'ap-southeast-1',
+    lookup_s3_bucket: str = 'dsai-price-realism-staging',
+    lookup_s3_key: str = 'uae/lookup/segment_lookup_table.parquet',
+    location_tree_s3_key: str = 'uae/lookup/location_tree_lookup.parquet',
 ):
     """
     Create a SageMaker model.
@@ -37,23 +40,30 @@ def create_model(
     Args:
         model_name: Name for the model
         image_uri: ECR image URI
-        model_data_url: S3 URL to model artifacts (lookup table)
         role_arn: IAM role ARN for SageMaker
         region: AWS region
+        lookup_s3_bucket: S3 bucket for lookup table and feedback
+        lookup_s3_key: S3 key for the segment lookup table parquet
+        location_tree_s3_key: S3 key for the location tree lookup parquet
     """
     sagemaker = boto3.client('sagemaker', region_name=region)
     
     print(f"Creating SageMaker model: {model_name}")
+    print(f"Setting LOOKUP_TABLE_S3_BUCKET={lookup_s3_bucket}")
+    print(f"Setting LOOKUP_TABLE_S3_KEY={lookup_s3_key}")
+    print(f"Setting LOCATION_TREE_S3_KEY={location_tree_s3_key}")
     
     try:
         response = sagemaker.create_model(
             ModelName=model_name,
             PrimaryContainer={
                 'Image': image_uri,
-                'ModelDataUrl': model_data_url,
                 'Environment': {
                     'SAGEMAKER_PROGRAM': 'serve.py',
-                    'SAGEMAKER_SUBMIT_DIRECTORY': '/opt/ml/model'
+                    'LOOKUP_TABLE_S3_BUCKET': lookup_s3_bucket,
+                    'LOOKUP_TABLE_S3_KEY': lookup_s3_key,
+                    'LOCATION_TREE_S3_KEY': location_tree_s3_key,
+                    'CX_FEEDBACK_S3_BUCKET': lookup_s3_bucket,
                 }
             },
             ExecutionRoleArn=role_arn
@@ -146,6 +156,9 @@ def update_endpoint(
         config_name: Name of the new endpoint configuration
         region: AWS region
         wait: Whether to wait for the update to complete
+        
+    Returns:
+        tuple: (success: bool, error: Exception or None)
     """
     sagemaker = boto3.client('sagemaker', region_name=region)
     
@@ -168,10 +181,68 @@ def update_endpoint(
             )
             print(f"Endpoint {endpoint_name} update complete and in service!")
         
-        return True
+        return True, None
     except Exception as e:
         print(f"Error updating endpoint: {str(e)}")
-        return False
+        return False, e
+
+
+def delete_endpoint_if_exists(
+    endpoint_name: str,
+    region: str = 'ap-southeast-1'
+):
+    """
+    Delete a SageMaker endpoint if it exists.
+    
+    Args:
+        endpoint_name: Name of the endpoint to delete
+        region: AWS region
+    """
+    sagemaker = boto3.client('sagemaker', region_name=region)
+    
+    try:
+        # Check if endpoint exists and get its status
+        response = sagemaker.describe_endpoint(EndpointName=endpoint_name)
+        endpoint_status = response['EndpointStatus']
+        print(f"Endpoint {endpoint_name} exists with status: {endpoint_status}. Deleting...")
+        
+        # Delete the endpoint
+        sagemaker.delete_endpoint(EndpointName=endpoint_name)
+        print(f"Endpoint {endpoint_name} deletion initiated.")
+        
+        # Only wait for deletion if endpoint was not in a Failed state
+        # Failed endpoints may not transition properly through the waiter
+        if endpoint_status != 'Failed':
+            print("Waiting for endpoint deletion to complete...")
+            waiter = sagemaker.get_waiter('endpoint_deleted')
+            waiter.wait(EndpointName=endpoint_name)
+            print("Endpoint deletion complete.")
+        else:
+            # For failed endpoints, just poll until it's gone
+            print("Endpoint was in Failed state. Polling for deletion...")
+            import time
+            max_attempts = 60
+            for attempt in range(max_attempts):
+                try:
+                    sagemaker.describe_endpoint(EndpointName=endpoint_name)
+                    time.sleep(5)
+                except sagemaker.exceptions.ClientError as e:
+                    if 'Could not find endpoint' in str(e) or 'ValidationException' in str(e):
+                        print("Endpoint deletion complete.")
+                        break
+                    raise
+            else:
+                print("Warning: Endpoint deletion timed out, but proceeding anyway.")
+        
+    except sagemaker.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'ValidationException':
+            print(f"Endpoint {endpoint_name} does not exist. Proceeding with creation.")
+        else:
+            print(f"Error checking/deleting endpoint: {str(e)}")
+            raise
+    except Exception as e:
+        print(f"Error deleting endpoint: {str(e)}")
+        raise
 
 
 def create_endpoint(
@@ -232,7 +303,7 @@ def load_config():
     load_dotenv(env_file)
     
     # Required variables
-    required_vars = ['IMAGE_NAME', 'REGION', 'ACCOUNT_ID', 'ROLE_ARN', 'MODEL_DATA_URL', 'ENDPOINT_NAME']
+    required_vars = ['IMAGE_NAME', 'REGION', 'ACCOUNT_ID', 'ROLE_ARN', 'ENDPOINT_NAME']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
@@ -245,10 +316,12 @@ def load_config():
         'region': os.getenv('REGION'),
         'account_id': os.getenv('ACCOUNT_ID'),
         'role_arn': os.getenv('ROLE_ARN'),
-        'model_data_url': os.getenv('MODEL_DATA_URL'),
         'endpoint_name': os.getenv('ENDPOINT_NAME'),
         'instance_type': os.getenv('INSTANCE_TYPE', 'ml.m5.xlarge'),
-        'instance_count': int(os.getenv('INSTANCE_COUNT', '1'))
+        'instance_count': int(os.getenv('INSTANCE_COUNT', '1')),
+        'lookup_s3_bucket': os.getenv('LOOKUP_TABLE_S3_BUCKET', 'dsai-price-realism-staging'),
+        'lookup_s3_key': os.getenv('LOOKUP_TABLE_S3_KEY', 'uae/lookup/segment_lookup_table.parquet'),
+        'location_tree_s3_key': os.getenv('LOCATION_TREE_S3_KEY', 'uae/lookup/location_tree_lookup.parquet'),
     }
     
     # Build image URI (repo managed by DevOps, image_name used as tag)
@@ -260,6 +333,32 @@ def load_config():
 
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Deploy the outlier detection model to SageMaker',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+IMPORTANT: If the endpoint has auto-scaling enabled, you must first run
+deregister_autoscaling.py with dsa-production credentials before running
+this script with TEAM credentials. After deployment, re-register autoscaling
+by running register_autoscaling.py with dsa-production credentials.
+
+Zero-downtime deployment process:
+1. Run deregister_autoscaling.py (with dsa-production credentials)
+2. Run deploy_to_sagemaker.py (with TEAM credentials)
+3. Run register_autoscaling.py (with dsa-production credentials)
+
+If you don't have permissions to update the endpoint, use --force-deployment:
+  python deploy_to_sagemaker.py --force-deployment
+        """
+    )
+    parser.add_argument(
+        '--force-deployment',
+        action='store_true',
+        help='Force deployment by deleting and recreating the endpoint if update fails due to permissions'
+    )
+    args = parser.parse_args()
+    
     # Load configuration from .env file
     print("Loading configuration from .env file...")
     config = load_config()
@@ -277,7 +376,8 @@ def main():
     print(f"Model Name: {model_name}")
     print(f"Config Name: {config_name}")
     print(f"Image URI: {config['image_uri']}")
-    print(f"Model Data: {config['model_data_url']}")
+    print(f"Lookup S3: s3://{config['lookup_s3_bucket']}/{config['lookup_s3_key']}")
+    print(f"Location Tree S3: s3://{config['lookup_s3_bucket']}/{config['location_tree_s3_key']}")
     print(f"Role ARN: {config['role_arn']}")
     print(f"Instance Type: {config['instance_type']}")
     print(f"Instance Count: {config['instance_count']}")
@@ -289,9 +389,11 @@ def main():
     if not create_model(
         model_name=model_name,
         image_uri=config['image_uri'],
-        model_data_url=config['model_data_url'],
         role_arn=config['role_arn'],
-        region=config['region']
+        region=config['region'],
+        lookup_s3_bucket=config['lookup_s3_bucket'],
+        lookup_s3_key=config['lookup_s3_key'],
+        location_tree_s3_key=config['location_tree_s3_key'],
     ):
         print("Failed to create model. Exiting.")
         return 1
@@ -321,14 +423,61 @@ def main():
         print(f"Endpoint {config['endpoint_name']} exists with status: {status}")
         print("Performing zero-downtime update...")
         print()
-        if not update_endpoint(
+        success, error = update_endpoint(
             endpoint_name=config['endpoint_name'],
             config_name=config_name,
             region=config['region'],
             wait=True
-        ):
-            print("Failed to update endpoint. Exiting.")
-            return 1
+        )
+        
+        if not success:
+            # Check if it's an AccessDeniedException
+            is_access_denied = error and 'AccessDeniedException' in str(type(error).__name__)
+            if not is_access_denied:
+                # Try to check the error message as well
+                is_access_denied = error and 'AccessDeniedException' in str(error)
+            
+            if is_access_denied:
+                print()
+                print("=" * 80)
+                print("ACCESS DENIED: You don't have permission to update the endpoint.")
+                print("=" * 80)
+                
+                if args.force_deployment:
+                    print("--force-deployment flag is set. Deleting and recreating the endpoint...")
+                    print("WARNING: This will cause downtime during the deployment.")
+                    print()
+                    
+                    # Delete the existing endpoint
+                    try:
+                        delete_endpoint_if_exists(
+                            endpoint_name=config['endpoint_name'],
+                            region=config['region']
+                        )
+                    except Exception as e:
+                        print(f"Failed to delete existing endpoint: {str(e)}")
+                        return 1
+                    
+                    print()
+                    
+                    # Create the new endpoint
+                    if not create_endpoint(
+                        endpoint_name=config['endpoint_name'],
+                        config_name=config_name,
+                        region=config['region'],
+                        wait=True
+                    ):
+                        print("Failed to create endpoint. Exiting.")
+                        return 1
+                else:
+                    print("To force deployment by deleting and recreating the endpoint, run:")
+                    print(f"  python {sys.argv[0]} --force-deployment")
+                    print()
+                    print("WARNING: Using --force-deployment will cause downtime during deployment.")
+                    return 1
+            else:
+                print("Failed to update endpoint. Exiting.")
+                return 1
     else:
         print(f"Endpoint {config['endpoint_name']} does not exist. Creating new endpoint...")
         print()
