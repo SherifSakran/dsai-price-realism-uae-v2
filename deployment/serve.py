@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 
 from deployment.src.schemas import PredictionRequest, PredictionResponse, FeedbackSubmissionRequest
-from deployment.src.model_loader import load_model
+from deployment.src import model_loader
 from deployment.src.inference import process_single_request
 from deployment.src import feedback_loop
 
@@ -25,21 +25,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-artifacts = None
-
-
 def _load_artifacts_with_feedback():
-    global artifacts
-    artifacts = load_model()
+    model_loader.load_model()
     feedback_loop._load_feedback_from_s3()
-    return artifacts
 
 
 @app.get('/ping')
 async def ping():
     """Health check endpoint."""
     try:
-        if artifacts is None:
+        if model_loader.lookup_last_update_ts is None:
             _load_artifacts_with_feedback()
         return JSONResponse(content={'status': 'healthy'}, status_code=200)
     except Exception as e:
@@ -53,11 +48,11 @@ async def invocations(request: Request):
     Main inference endpoint for outlier detection.
     Accepts single request or batch of requests.
     """
-    global artifacts
     try:
-        if artifacts is None:
+        if model_loader.lookup_last_update_ts is None:
             _load_artifacts_with_feedback()
 
+        model_loader.maybe_refresh_lookup()
         feedback_loop.maybe_refresh_feedback()
 
         content_type = request.headers.get('content-type', 'application/json')
@@ -110,6 +105,33 @@ async def invocations(request: Request):
                 "timestamp": datetime.now().isoformat()
             }
 
+        if isinstance(data, dict) and data.get('action') == 'check_lookup_status':
+            print("[ACTION] Check lookup status requested via /invocations", file=sys.stderr)
+            current_artifacts = model_loader.artifacts
+            return {
+                "action": "check_lookup_status",
+                "status": "success",
+                "segments": len(current_artifacts['lookup_table']),
+                "locations": len(current_artifacts['location_tree_lookup']),
+                "last_update_ts": model_loader.lookup_last_update_ts.isoformat() if model_loader.lookup_last_update_ts else None,
+                "is_updating": model_loader._lookup_updating,
+                "timestamp": datetime.now().isoformat()
+            }
+
+        if isinstance(data, dict) and data.get('action') == 'force_refresh_lookup':
+            print("[ACTION] Force refresh lookup requested via /invocations", file=sys.stderr)
+            model_loader.load_model()
+            current_artifacts = model_loader.artifacts
+            print(f"[DEBUG] After refresh - lookup has {len(current_artifacts['lookup_table'])} segments, {len(current_artifacts['location_tree_lookup'])} locations", file=sys.stderr)
+            return {
+                "action": "force_refresh_lookup",
+                "status": "success",
+                "segments": len(current_artifacts['lookup_table']),
+                "locations": len(current_artifacts['location_tree_lookup']),
+                "timestamp": datetime.now().isoformat()
+            }
+
+        artifacts = model_loader.artifacts
         lookup_dict = artifacts["lookup_table"].set_index('segment_key').to_dict('index')
 
         is_batch = isinstance(data, list)
@@ -169,6 +191,38 @@ async def feedback_status():
         'feedback_segments': len(feedback_loop.feedback_lookup['by_segment_key']),
         'last_update_ts': feedback_loop.feedback_last_update_ts.isoformat() if feedback_loop.feedback_last_update_ts else None,
         'is_updating': feedback_loop._feedback_updating,
+    }, status_code=200)
+
+
+@app.post('/refresh_lookup')
+async def refresh_lookup():
+    """
+    Force-refresh the lookup table from S3.
+    This endpoint triggers a synchronous reload.
+    """
+    try:
+        model_loader.load_model()
+        artifacts = model_loader.artifacts
+        return JSONResponse(content={
+            'status': 'refreshed',
+            'segments': len(artifacts['lookup_table']),
+            'locations': len(artifacts['location_tree_lookup']),
+            'last_update_ts': model_loader.lookup_last_update_ts.isoformat() if model_loader.lookup_last_update_ts else None,
+        }, status_code=200)
+    except Exception as e:
+        print(f"[LOOKUP] Force refresh failed: {traceback.format_exc()}", file=sys.stderr)
+        return JSONResponse(content={'error': str(e)}, status_code=500)
+
+
+@app.get('/lookup_status')
+async def lookup_status():
+    """Return current lookup table status."""
+    artifacts = model_loader.artifacts
+    return JSONResponse(content={
+        'segments': len(artifacts['lookup_table']),
+        'locations': len(artifacts['location_tree_lookup']),
+        'last_update_ts': model_loader.lookup_last_update_ts.isoformat() if model_loader.lookup_last_update_ts else None,
+        'is_updating': model_loader._lookup_updating,
     }, status_code=200)
 
 
