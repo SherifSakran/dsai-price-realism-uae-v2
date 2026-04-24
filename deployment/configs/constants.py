@@ -2,6 +2,14 @@ import os
 
 MODEL_PATH = os.getenv('MODEL_PATH', '/opt/ml/model')
 
+LOOKUP_TABLE_S3_BUCKET = os.getenv(
+    'LOOKUP_TABLE_S3_BUCKET', 'dsai-price-realism-staging')
+LOOKUP_TABLE_S3_KEY = os.getenv(
+    'LOOKUP_TABLE_S3_KEY', 'uae/lookup/segment_lookup_table.parquet')
+LOCATION_TREE_S3_KEY = os.getenv(
+    'LOCATION_TREE_S3_KEY', 'uae/lookup/location_tree_lookup.parquet')
+LOOKUP_REFRESH_SECONDS = int(os.getenv('LOOKUP_REFRESH_SECONDS', str(3600 * 24 * 7)))
+
 TOP_RESIDENTIAL_TYPES = [
     'Apartment', 'Villa', 'Townhouse',
     'Hotel & Hotel Apartment', 'Penthouse', 'Duplex'
